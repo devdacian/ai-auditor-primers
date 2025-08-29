@@ -1,9 +1,9 @@
-# ERC4626 Vault Security Primer v13.5
+# ERC4626 Vault Security Primer v13.6
 
 ## Overview
 This primer consolidates critical security patterns and vulnerabilities discovered across multiple vault implementations, including ERC4626 vaults, yield-generating vaults, vault-like protocols, auto-redemption mechanisms, weighted pool implementations, cross-chain vault systems, multi-vault architectures, AMM-integrated vault systems, CDP vault implementations, position action patterns, fee distribution mechanisms, funding rate arbitrage systems, collateralized lending vaults, and stablecoin protocols. Use this as a reference when auditing new vault protocols to ensure comprehensive vulnerability detection.
 
-**Latest Update**: Added pattern #364 Smart Wallet Approved Hashes integration bug.
+**Latest Update**: Added pattern #365 Governance Function Inheritance Inconsistency bug.
 
 ## Critical Vulnerability Patterns
 
@@ -6868,6 +6868,55 @@ depositId = keccak256(abi.encode(
 
 This pattern highlights how ERC1271 support introduces subtle edge cases that aren't immediately obvious, especially around approved hash functionality that major wallets like Safe rely on.
 
+### 365. Governance Function Inheritance Inconsistency
+
+**Pattern**: Contract overrides voting power calculation but fails to override historical voting queries, breaking governance integration.
+
+**The Vulnerability**:
+```solidity
+contract VulnerableToken is ERC20VotesUpgradeable {
+    // Overrides current voting power with custom logic
+    function getVotes(address account) override returns (uint256) {
+        uint256 votingPower = super.getVotes(account);
+        votingPower += VESTER.unclaimed(account);  // Add vesting
+        if (delegates(account) == address(0)) {
+            votingPower += balanceOf(account);     // Auto-delegation
+        }
+        return votingPower;
+    }
+    
+    // MISSING: getPastVotes() override
+    // Base implementation doesn't know about vesting or auto-delegation
+}
+```
+
+**Why It's Critical**:
+- OpenZeppelin Governor and most governance frameworks use `getPastVotes()` for snapshot voting
+- Users see voting power in UI (`getVotes()`) but can't vote in proposals
+- Breaks entire governance system for undelegated users and vesting recipients
+- Security controls (blacklists) may only apply to one function
+
+**Real Attack Scenario**:
+1. Protocol shows user has 1M voting power (via `getVotes()`)
+2. User attempts to vote on critical proposal
+3. Transaction succeeds but records 0 votes (via `getPastVotes()`)
+4. Governance captured by small group who understand the bug
+
+**How to Find**:
+1. Search for `override` keyword on voting functions
+2. Check if `getPastVotes` is also overridden when `getVotes` has custom logic
+3. Look for custom voting additions: vesting, staking, multipliers, auto-delegation
+4. Test with actual Governor integration, not just token in isolation
+
+**Test Code**:
+```solidity
+// This MUST pass for governance to work
+uint256 currentVotes = token.getVotes(user);
+vm.roll(block.number + 1);
+uint256 pastVotes = token.getPastVotes(user, block.number - 1);
+assertEq(currentVotes, pastVotes, "Governance is broken!");
+```
+
 
 ## Common Attack Vectors
 
@@ -7214,6 +7263,14 @@ This pattern highlights how ERC1271 support introduces subtle edge cases that ar
 - Unrestricted Burning: Calling public burn functions to deflate supply
 - Supply Manipulation: Using mint/burn to manipulate rebalancing calculations
 - Strategic Timing: Minting before rebalancing to affect collateral ratios
+
+### 17. Governance Manipulation Vectors
+- Historical vs current voting power discrepancies
+- Snapshot voting bypasses
+- Delegation checkpoint gaps
+- Blacklist/exclusion bypass through historical queries
+- Vesting token governance exclusion
+- Auto-delegation UI/UX deception
 
 ## Integration Hazards
 
@@ -7582,6 +7639,14 @@ This pattern highlights how ERC1271 support introduces subtle edge cases that ar
 - Multi-signature operation limitations
 - DAO/multisig usability constraints
 
+### 23. Governance Framework Integration
+- OpenZeppelin Governor using getPastVotes exclusively
+- Snapshot proposal mechanics requiring historical queries
+- Compound Governor compatibility issues
+- Delegation system assumptions
+- Voting power calculation mismatches
+- UI showing getVotes while governance uses getPastVotes
+
 ## Audit Checklist
 
 ### State Management
@@ -7931,6 +7996,15 @@ This pattern highlights how ERC1271 support introduces subtle edge cases that ar
 - [ ] Liquidation-specific security measures
 - [ ] Precision loss prevention measures
 
+### Governance-Specific Checks
+
+- [ ] If getVotes overridden, verify getPastVotes also overridden
+- [ ] Custom voting logic applied to both current and historical
+- [ ] Blacklist/exclusion checks in both functions
+- [ ] Vesting tokens handled consistently
+- [ ] Auto-delegation reflected in checkpoints
+- [ ] Test with actual Governor contract, not standalone
+
 ## Invariant Analysis
 
 When analyzing vault implementations, identify and attempt to break these common invariants:
@@ -8019,6 +8093,12 @@ When analyzing vault implementations, identify and attempt to break these common
 - [ ] Borrowers can repay unless liquidated
 - [ ] Debt cannot be closed without repayment
 - [ ] Positions above liquidation threshold are safe
+
+### Governance Invariants
+- [ ] getVotes(user) at block N = getPastVotes(user, N) when queried at N+1
+- [ ] Blacklisted users have 0 voting power in both current and historical
+- [ ] Total voting power conservation across delegations
+- [ ] Checkpoint creation on all voting power changes
 
 ## Essential ERC4626 Defensive Security Patterns
 
