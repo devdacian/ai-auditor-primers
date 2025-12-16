@@ -1,9 +1,9 @@
-# ERC4626 Vault Security Primer v13.6
+# ERC4626 Vault Security Primer v13.7
 
 ## Overview
 This primer consolidates critical security patterns and vulnerabilities discovered across multiple vault implementations, including ERC4626 vaults, yield-generating vaults, vault-like protocols, auto-redemption mechanisms, weighted pool implementations, cross-chain vault systems, multi-vault architectures, AMM-integrated vault systems, CDP vault implementations, position action patterns, fee distribution mechanisms, funding rate arbitrage systems, collateralized lending vaults, and stablecoin protocols. Use this as a reference when auditing new vault protocols to ensure comprehensive vulnerability detection.
 
-**Latest Update**: Added pattern #365 Governance Function Inheritance Inconsistency bug.
+**Latest Update**: Added pattern #366 msg.value Balance Inflation in Gate Checks.
 
 ## Critical Vulnerability Patterns
 
@@ -6916,6 +6916,58 @@ vm.roll(block.number + 1);
 uint256 pastVotes = token.getPastVotes(user, block.number - 1);
 assertEq(currentVotes, pastVotes, "Governance is broken!");
 ```
+
+
+### 366. msg.value Balance Inflation in Gate Checks
+
+**Pattern**: Payable functions that perform balance-based gate checks using `address(this).balance` before forwarding ETH. Since `address(this).balance` already includes `msg.value` at execution time, threshold checks are temporarily inflated, potentially allowing bypass of deficit/minimum balance gates.
+
+**Vulnerable Code Example**:
+```solidity
+// VULNERABLE: Gate check includes msg.value in balance calculation
+modifier onlyWhenReserveInDeficit() {
+    uint256 reserveBalance = address(this).balance; // ← Already includes msg.value!
+    if (reserveBalance >= MINIMUM_RESERVE_BALANCE) revert ReserveNotInDeficit();
+    _;
+}
+
+function triggerExternalAction() external payable onlyWhenReserveInDeficit {
+    // ... perform action ...
+    (bool success,) = externalContract.call{value: msg.value}("");
+    require(success);
+}
+```
+
+**Attack Scenario**:
+1. System has healthy reserve: 100 ETH reserve, 1000 ETH total, 10% minimum = 100 ETH threshold
+2. Attacker calls `triggerExternalAction{value: 10 ETH}()`
+3. During gate check: total becomes 1010 ETH, minimum becomes 101 ETH
+4. Reserve (100 ETH) < minimum (101 ETH) → gate bypassed despite healthy reserve
+5. ETH is forwarded, but unauthorized action was triggered
+
+**Secure Implementation**:
+```solidity
+// SECURE: Exclude msg.value from balance calculation
+modifier onlyWhenReserveInDeficit() {
+    uint256 reserveBalance = address(this).balance - msg.value;
+    if (reserveBalance >= MINIMUM_RESERVE_BALANCE) revert ReserveNotInDeficit();
+    _;
+}
+```
+
+**Detection Heuristics**:
+- Identify all `payable` functions
+- Inside `payable` functions check for any use of `address(this).balance` in modifiers, function body, or child function calls
+- Verify whether `msg.value` is subtracted before balance-based calculations
+- Check if ETH is subsequently forwarded via `call`, `transfer`, or `send`
+- Examine gate/access control checks that rely on balance comparisons
+- Watch for patterns where inflated balance could flip a boolean condition
+
+**Severity Considerations**:
+- Impact depends on what action the gate protects
+- Often Low-Medium: triggers unnecessary/premature actions without direct fund loss
+- Can be High if gate protects critical state changes or fund movements
+- Attack cost is typically just gas + any non-refunded fees
 
 
 ## Common Attack Vectors
